@@ -477,14 +477,68 @@ FROM dblink('public_insurance_conn',
             'SELECT holderid, fullname, plantype FROM policyholder WHERE plantype=''Premium''') 
 AS premium_holders(holderid varchar(9), fullname text, plantype text);
 
-SELECT * FROM policyholder
 
 -- Get claims from private_insurance with status 'Approved'
 SELECT * 
 FROM dblink('private_insurance_conn', 
-            'SELECT claimid, holderid, amountclaimed FROM claim WHERE status=''Approved''') 
+            'SELECT claimid, holderid, amountclaimed FROM claim WHERE amountclaimed=''Approved''') 
 AS approved_claims(claimid int, holderid varchar(9), amountclaimed numeric(12,2));
 
+--Distributed Joins Using Named Database Links
+-- Join local hospital table with remote claims from both databases
+SELECT 
+    h.name as hospital_name,
+    h.type as hospital_type,
+    COALESCE(pub.claim_count, 0) as public_claim_count,
+    COALESCE(priv.claim_count, 0) as private_claim_count
+FROM hospital h
+LEFT JOIN (
+    SELECT hospitalid, COUNT(*) as claim_count
+    FROM dblink('public_insurance_conn', 
+                'SELECT hospitalid FROM claim') 
+    AS pub_claims(hospitalid int)
+    GROUP BY hospitalid
+) pub ON h.hospitalid = pub.hospitalid
+LEFT JOIN (
+    SELECT hospitalid, COUNT(*) as claim_count
+    FROM dblink('private_insurance_conn', 
+                'SELECT hospitalid FROM claim') 
+    AS priv_claims(hospitalid int)
+    GROUP BY hospitalid
+) priv ON h.hospitalid = priv.hospitalid
+ORDER BY h.name;
+
+--Complex Distributed Join
+-- Compare total claimed amount by hospital and insurance category
+SELECT 
+    h.name as hospital_name,
+    h.type as hospital_type,
+    COALESCE(pub.total_claimed, 0) as public_total_claimed,
+    COALESCE(priv.total_claimed, 0) as private_total_claimed,
+    COALESCE(pub.total_claimed, 0) + COALESCE(priv.total_claimed, 0) as total_claimed
+FROM hospital h
+LEFT JOIN (
+    SELECT hospitalid, SUM(amountclaimed) as total_claimed
+    FROM dblink('public_insurance_conn', 
+                'SELECT hospitalid, amountclaimed FROM claim') 
+    AS pub_claims(hospitalid int, amountclaimed numeric(12,2))
+    GROUP BY hospitalid
+) pub ON h.hospitalid = pub.hospitalid
+LEFT JOIN (
+    SELECT hospitalid, SUM(amountclaimed) as total_claimed
+    FROM dblink('private_insurance_conn', 
+                'SELECT hospitalid, amountclaimed FROM claim') 
+    AS priv_claims(hospitalid int, amountclaimed numeric(12,2))
+    GROUP BY hospitalid
+) priv ON h.hospitalid = priv.hospitalid
+ORDER BY total_claimed DESC;
+
+--Close the Database Links (Optional)
+--After use, we can close the connections. However, they will be closed when the session ends.
+-- Close the connections
+
+SELECT dblink_disconnect('public_insurance_conn');
+SELECT dblink_disconnect('private_insurance_conn');
 
 /* Task 3: Parallel Query Execution
 =========================================*/
@@ -498,14 +552,59 @@ SELECT * FROM pg_available_extensions WHERE name = 'pg_hint_plan'; /* checking a
 
 SET max_parallel_workers_per_gather = 8; /* setting up to 8 parallel worker processes allowed to use when executing parallel queries */
 
--- Serial execution 
 
-EXPLAIN ANALYZE SELECT COUNT(*) FROM PolicyHolder;
+SELECT COUNT(*) FROM claim;
 
--- Parallel execution performance
+--the table claim has fear data (9), yet to compare this we need a large table
+--Let's create a large table called large_claims that has 1000000 and then run the query.
 
-EXPLAIN ANALYZE SELECT /*+ Parallel(PolicyHolder 4) */ COUNT(*) FROM PolicyHolder;
-EXPLAIN ANALYZE SELECT COUNT(*) FROM PolicyHolder;
+-- Create a large table by duplicating the claim table many times
+CREATE TABLE large_claims AS
+SELECT 
+  (random()*1000000)::int as claimid,
+  (array['A00000001','B00000002','C00000003','D00000004','E00000005','F00000006','G00000007','H00000008','I00000009','J00000010'])[(random()*10)::int] as holderid,
+  (random()*8+1)::int as hospitalid,
+  current_date - (random()*365)::int as datefiled,
+  (random()*100000)::numeric(12,2) as amountclaimed,
+  (array['Pending','Approved','Rejected'])[(random()*3)::int] as status
+FROM generate_series(1, 1000000);
+
+SELECT COUNT(*) FROM large_claims;
+
+
+-- Check the current setting of max_parallel_workers_per_gather
+SHOW max_parallel_workers_per_gather;
+
+-- our max_parallel_workers_per_gather is Set to 8 as done above for the session.
+--(SET max_parallel_workers_per_gather = 8;)
+
+-- Now, run a query on the large_claims table and see if it uses parallel query
+
+-- Serial execution without (formated result) 
+EXPLAIN ANALYZE
+SELECT status, COUNT(*), AVG(amountclaimed)
+FROM large_claims
+GROUP BY status;
+
+-- Serial execution with (formated result)
+EXPLAIN (ANALYZE, FORMAT JSON)
+SELECT status, COUNT(*), AVG(amountclaimed)
+FROM large_claims
+GROUP BY status;
+
+
+--Parallel execution without (formated result)
+EXPLAIN ANALYZE
+SELECT status, /*+ Parallel(PolicyHolder 4) */ COUNT(*), AVG(amountclaimed)
+FROM large_claims
+GROUP BY status;
+
+--Parallel execution with (formated result)
+EXPLAIN (ANALYZE, FORMAT JSON)
+SELECT status, /*+ Parallel(PolicyHolder 4) */ COUNT(*), AVG(amountclaimed)
+FROM large_claims
+GROUP BY status;
+
 
 /* Task 4: Two-Phase Commit Simulation
 =========================================*/
@@ -614,3 +713,37 @@ ROLLBACK;
 SELECT * FROM dblink('dbname=PublicHealthInsuranceCompany_DB host=localhost user=postgres password=12345',
 'SELECT * FROM pg_prepared_xacts;')
 AS t(gid text, owner text, dbname text, prepared timestamp);
+
+/* Task 5: Distributed Rollback and Recovery
+=============================================*/
+/*Simulate a network failure during a distributed transaction. Check unresolved transactions and resolve
+them using ROLLBACK FORCE. Submit screenshots and brief explanation of recovery steps*/
+
+/* Task 6: Distributed Concurrency Control
+===========================================*/
+/*Demonstrate a lock conflict by running two sessions that update the same record from different nodes.
+Query DBA_LOCKS and interpret results*/
+
+/* Task 7: Parallel Data Loading / ETL Simulation
+=================================================*/
+/*Perform parallel data aggregation or loading using PARALLEL DML. 
+Compare runtime and document improvement in query cost and execution time.*/
+
+/* Task 8: Three-Tier Client–Server Architecture Design
+=========================================================*/
+/*Draw and explain a three-tier architecture for your project (Presentation, Application, Database). 
+Show data flow and interaction with database links*/
+
+
+
+/* Task 9: Distributed Query Optimization
+=========================================*/
+/*Use EXPLAIN PLAN and DBMS_XPLAN.DISPLAY to analyze a distributed join. 
+Discuss optimizer strategy and how data movement is minimized.*/
+
+/* Task 10: Performance Benchmark and Report
+===========================================*/
+/*Run one complex query three ways – centralized,parallel, distributed. Measure time and I/O using
+AUTOTRACE. Write a half-page analysis on scalabilityand efficiency.*/
+
+
