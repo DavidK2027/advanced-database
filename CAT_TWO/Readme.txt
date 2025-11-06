@@ -3,7 +3,7 @@ TOPIC: DIGITAL HEALTH INSURANCE AND CLAIMS
 
 The Summary
 ------------
-This read me file is all about ADVANCED DATABASE PROJECT-BASE EXAM. The exam has two main sections (A & B).
+This read me file is all about ADVANCED DATABASE PROJECT-BASE CAT 2. The exam has two main sections (A & B).
 Section A has 5 questions and B has 5 questions and each question ha it’s related sub questions as more detailed here bellow.
 PostgreSQL is the database used during this project. 
 
@@ -517,5 +517,6 @@ screenshots for tests
 
    
  
+
 
 
